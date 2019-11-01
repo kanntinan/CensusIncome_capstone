@@ -1,0 +1,322 @@
+---
+title: "Predict adult census income"
+author: "Kantinan Nantanadisai"
+date: "10/19/2019"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction and overview
+This capstone project aim to classify adult income (<=50k or >50k) on Adult Census Income data set on kaggle (https://www.kaggle.com/uciml/adult-census-income).
+
+```{r  include=FALSE}
+# Setup packages that use in this analysis.
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(httr)) install.packages("httr", repos = "http://cran.us.r-project.org")
+if(!require(forcats)) install.packages("forcats", repos = "http://cran.us.r-project.org")
+if(!require(ggpubr)) install.packages("ggpubr", repos = "http://cran.us.r-project.org")
+if(!require(rpart)) install.packages("rpart", repos = "http://cran.us.r-project.org")
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+if(!require(Rborist)) install.packages("Rborist", repos = "http://cran.us.r-project.org")
+if(!require(GGally)) install.packages("GGally", repos = "http://cran.us.r-project.org")
+if(!require(rattle)) install.packages("rattle", repos = "http://cran.us.r-project.org")
+```
+
+```{r  include=FALSE}
+# Download adult census income data set from my github.
+data <-read.csv("https://raw.githubusercontent.com/kanntinan/DS/master/adult.csv", header=T)
+glimpse(data)
+```
+
+Data set have 32,561 observation and 15 variables as follows : 
+age, workclass, fnlwgt, education, education.num, marital.status, occupation, relationship,
+race, sex, capital.gain, capital.loss, hours.per.week, native.country and income as target variable. 
+
+## Variables review
+ - This data set are extract from 1994 Census bureau database by use "fnlwgt" variable to control 
+1.A single cell estimate of the population 16+ for each state.
+2.Controls for Hispanic Origin by age and sex.
+3.Controls by Race, age and sex.
+ - Education and Education.num are the same meaning (e.g. Education.num = 1 mean Preschool, Education.num = 2 mean 1st - 4th).
+ - In this study we add capital variable to define capital categories (positive, negative or zero).
+ - Also add capital_cost variabel to group capital.gain(positive value) and capital.loss(negative value).
+
+## Data Exploration 
+
+Data set contain "?" symbol that we tranfrom to missing value(NA) in this analysis.
+3 variables workclass occupation and native.country have missing value, 
+for impute these missing value we choose impute by most frequence value in each variable.
+We found occupation are depend on workclass, then we decide to use most frequence occupation from most frequence workclass.
+
+```{r  include=FALSE}
+# Tranform missing value from "?" to NA 
+data[data == "?" ] <- "NA"
+
+# workclass, occupation and native.country have missing value 
+colnames(data)[colSums(is.na(data)) > 0]
+
+# Generate function for calculate mode
+Mode <- function (x, na.rm) {
+  xtab <- table(x)
+  xmode <- names(which(xtab == max(xtab)))
+  if (length(xmode) > 1) xmode <- ">1 mode"
+  return(xmode)
+}
+
+# Impute missing value with most frequence value
+data %>% filter(is.na(workclass)) %>% select(occupation) %>% table()
+data$workclass[is.na(data$workclass)]  <- Mode(data$workclass)
+
+# Missing workclass tend to missing occupation too.
+# to fill missing value in occupation we use most frequence occupation from most frequence workclass  
+data$occupation[is.na(data$occupation)]  <- data %>% filter(workclass == Mode(data$workclass)) %>% select(occupation) %>% Mode()
+data$native.country[is.na(data$native.country)] <- Mode(data$native.country)
+
+```
+
+```{r include=FALSE}
+# create capital and capital cost variables 
+data <- data %>% mutate(capital = ifelse(capital.gain != 0, "positive",
+                                         ifelse(capital.loss != 0, "negative","zero")))
+data <- data %>% mutate(capital_cost = ifelse(capital.gain != 0, capital.gain,
+                                              ifelse(capital.loss != 0, capital.loss * (-1),0)))
+```
+
+To select predictor variables, we decide to select variables that tend to effect target variable(income) and non near zero variables.
+We found capital.gain, capital.loss, native.country and capital_cost are near zero variables.
+Workclass and occupation tend to multiple co-linearity, we should to exclude one of them (in this study we exclude workclass).
+As a result we exclude fnlwgt,capital.loss ,capital.gain, capital_cost,native.country,education.num and workclass from predictor variable.
+
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+data %>% select(age,hours.per.week,capital.gain,capital.loss,capital_cost,capital,income) %>% ggpairs()
+```
+
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+# Zero- and Near Zero-Variance Predictors 
+  # freqRatio near 1 mean well-behaved predictors and very large for highly-unbalanced data
+nzv <- nearZeroVar(data, saveMetrics= TRUE)
+nzv
+```
+
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+# chi-square test for workclass and occupation
+chisq.test(data$workclass,data$occupation,simulate.p.value = TRUE)
+```
+```{r include=FALSE}
+# Exclaue Variables
+dat <- data %>% select(-c(fnlwgt,capital.loss ,capital.gain, capital_cost,native.country,education.num,workclass))
+```
+
+# Methods and Analysis
+This study aim to classify income that less than or equal 50K or not.
+We choose binary classification methods such as naive baye, dicision tree, logistic regression, rendom forest and
+evaluate model by accuracy and balance accuracy by F1 score.
+In each model we standardize data by center and scale in preprocess function and use 10-fold cross validation in trainControl function.
+
+Befor analysis we split data to training set 80% and 20% for test set (26,048 and 6,513 observation respectively).
+```{r include=FALSE}
+# Split data to train and test set
+set.seed(555, sample.kind="Rounding") 
+#set.seed(555) 
+test_index <- createDataPartition(data$income, times = 1, p = 0.2, list = FALSE)
+train_set <-dat %>% slice(-test_index)
+test_set <- dat %>% slice(test_index)
+```
+
+1.Naive baye
+We start analysis part with naive bate method, that calculate by conditional proabability as 
+P(income = "<=50K" | A) = P(education = "10th" | income = "<=50K") *  P(occupation  = "Adm-clerical" | income = "<=50K") * ...
+P(income = ">50K" | A) =  P(education = "10th" | income = ">50K") *  P(occupation  = "Adm-clerical" | income = ">50K") * ...
+if P(income = "<=50K" | A) are higher than P(income = ">50K" | A) then predict income = <=50K or
+predict income > 50K if P(income = ">50K" | A) are higher than P(income = "<=50K" | A) for each situation.
+
+Result show accuracy = 0.661 and F1 score = 0.717 for naive baye method.
+
+```{r include=FALSE}
+# fit by naive_baye ####
+set.seed(555, sample.kind="Rounding") 
+#set.seed(555)
+fit_baye<- train(income ~ ., data = train_set, method = "naive_bayes", preProcess = c("center", "scale"),
+                 trControl = trainControl(method="cv", number = 10, p = 0.8))
+y_hat_baye <- predict(fit_baye, test_set, type = "raw")
+acc_baye <- confusionMatrix(predict(fit_baye, test_set), test_set$income)$overall["Accuracy"]
+f1_baye <- confusionMatrix(predict(fit_baye, test_set), test_set$income)$byClass["F1"]
+
+```
+
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+results <- data_frame(method = "Naive baye", Accuracy = acc_baye, F1_Score = f1_baye)
+results %>% knitr::kable()
+```
+
+2.Logistic regression 
+Generalized linear model that modified output linear regression to probability between 0 and 1 by sigmoid function (s(x) = 1 / (1 + e^-x)).
+
+Result show accuracy = 0.829 and F1 score = 0.891 for logistic regression method.
+
+```{r include=FALSE}
+# fit by glm #### 
+set.seed(555, sample.kind="Rounding") 
+#set.seed(555)
+fit_glm<- train(income ~ ., data = train_set, method = "glm", family = "binomial",maxit = 100, preProcess = c("center", "scale"),
+                trControl = trainControl(method="cv", number = 10, p = 0.8))
+y_hat_glm <- predict(fit_glm, test_set, type = "raw")
+max(fit_glm$results["Accuracy"]) # train set accuracy
+acc_glm <- confusionMatrix(predict(fit_glm, test_set), test_set$income)$overall["Accuracy"]
+f1_glm <- confusionMatrix(predict(fit_glm, test_set), test_set$income)$byClass["F1"]
+```
+
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+results <- bind_rows(results,data_frame(method="Logistic Regression",Accuracy = acc_glm, F1_Score = f1_glm))
+results %>% knitr::kable()
+```
+
+3.K-nearest neighbor
+This method define the distance between all observations based on the features and find k nearest points.
+
+```{r include=FALSE}
+# fit by knn #### 
+set.seed(555, sample.kind="Rounding") 
+#set.seed(555)
+fit_knn<- train(income ~ ., data = train_set, method = "knn",preProcess = c("center", "scale"),
+                tuneGrid = data.frame(k = c(9,13,15,17,19,21)),
+                trControl =  trainControl(method = "cv", number = 10, p = 0.8))
+y_hat_knn <- predict(fit_knn, test_set, type = "raw")
+max(fit_knn$results["Accuracy"]) # train set accuracy
+acc_knn <- confusionMatrix(predict(fit_knn, test_set), test_set$income)$overall["Accuracy"]
+f1_knn <- confusionMatrix(predict(fit_knn, test_set), test_set$income)$byClass["F1"]
+```
+
+In this model we tuning parameter "k" and found k = 13 are return highest accuracy.
+
+Result show accuracy = 0.828 and F1 score = 0.888 for K-nearest neighbor method.
+
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+plot(fit_knn)
+# fit_knn$bestTune 
+```
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+results <- bind_rows(results,data_frame(method="KNN",Accuracy = acc_knn, F1_Score = f1_knn))
+results %>% knitr::kable()
+```
+
+4. Dicision tree
+This method use the best attribute of the dataset as the root node of the tree and split dicision nodes until find leaf nodes (income).
+Algorithm use gini index and entropy to select features in each split.
+
+```{r echo=FALSE, eval=TRUE,message=FALSE, error=FALSE}
+# fit by rpart ####
+set.seed(555, sample.kind="Rounding") 
+#set.seed(555)
+fit_rpart<- train(income ~ ., data = train_set, method = "rpart",preProcess = c("center", "scale"),
+                  trControl = trainControl(method="cv", number = 10, p = 0.8),
+                  tuneGrid = data.frame(cp = seq(0, 0.05, 0.002)))
+```
+
+In this model we tuning complexity parameter(cv) and found cv = 0.002 are return highest accuracy.
+
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+plot(fit_rpart)
+#fit_rpart$bestTune 
+```
+
+Look at the most important variables and we found marital status, capital, age are most importance variables respectively.
+Note: before this, we rum most importance variable in full model and found occupation tend to more importance variable than workclass,
+      this is why we keep occupation and exclude workclass.
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+varImp(fit_rpart) # important variables
+```
+
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+fancyRpartPlot(fit_rpart$finalModel)
+```
+
+Result show accuracy = 0.823 and F1 score = 0.887 for dicision tree method.
+
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+y_hat_rpart <- predict(fit_rpart, test_set, type = "raw")
+max(fit_rpart$results["Accuracy"]) # train set accuracy
+acc_rpart <- confusionMatrix(predict(fit_rpart, test_set), test_set$income)$overall["Accuracy"]
+f1_rpart <- confusionMatrix(predict(fit_rpart, test_set), test_set$income)$byClass["F1"]
+results <- bind_rows(results,data_frame(method="Dicision tree",Accuracy = acc_rpart, F1_Score = f1_rpart))
+results %>% knitr::kable()
+```
+
+5.Random forest 
+Ensemble models that combine many decision trees.
+In this analysis we use 50 trees and tuning mtry parameter (number of variables available for splitting at each tree node)
+and found that mtry = 3 are return highest accuracy.
+
+```{r include=FALSE}
+# fit by random forest ####
+set.seed(555, sample.kind="Rounding") 
+fit_rf <- train(income ~ ., data = train_set, method = "rf",preProcess = c("center", "scale"),
+                nTree = 50,
+                tuneGrid = data.frame(mtry = seq(3,5,7)),
+                trControl =  trainControl(method = "cv", number = 10, p = 0.8))
+
+y_hat_rf <- predict(fit_rf, test_set, type = "raw")
+acc_rf <- confusionMatrix(predict(fit_rf, test_set), test_set$income)$overall["Accuracy"]
+f1_rf <- confusionMatrix(predict(fit_rf, test_set), test_set$income)$byClass["F1"]
+```
+
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+print(paste("Best mtry is",fit_rf$bestTune))
+```
+
+Result show accuracy = 0.831 and F1 score = 0.894 for random forest method.
+
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+results <- bind_rows(results,data_frame(method="Random Forest",Accuracy = acc_rf, F1_Score = f1_rf))
+results %>% knitr::kable()
+```
+
+Ensemble : 
+Finally we create an ensemble using the predictions from the 5 models (naive baye, dicision tree, logistic regression, K-nearest neighbor and
+random forest) by generate a majority prediction of the income (<=50K or >50K).
+accuracy of the ensemble prediction is 0.83095 that a bit lower accuracy than random forest.
+
+```{r include=FALSE}
+# create data frame that contain predict value from all method
+pred <- data.frame(naivebaye = y_hat_baye, dicisiontree = y_hat_rpart,
+                   glm = y_hat_glm, knn = y_hat_knn, rf = y_hat_rf)
+
+# create function for ensemble 
+chooseBestModel <- function(x) {
+  tabulatedOutcomes <- table(x)
+  sortedOutcomes <- sort(tabulatedOutcomes, decreasing=TRUE)
+  mostCommonLabel <- names(sortedOutcomes)[1]
+  mostCommonLabel
+}
+result <- data.frame(ensemble = apply(pred, 1, chooseBestModel), y = test_set$income)
+```
+
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+print(paste("Ensemble accuracy is",round(mean(result$ensemble == result$y),5)))
+```
+
+# Result 
+Result show high accuracy and F1 score from all methods in this study (except naive baye) with around 1% difference.
+Random forest with 50 trees and 3 mtry are the best model in this study with accuracy = 0.831 and F1 score = 0.894
+(higher than ensemble prediction).
+
+```{r echo=FALSE, eval=TRUE,message=FALSE}
+results
+```
+
+# Conclusion
+This capstone project aim to classify adult income (<=50k or >50k) with binary classification methods.
+We start clasify by naive baye method and get poor accuracy result (0.661) then we use another method (logistic regression, K-nearest neighbor,
+dicision tree and randomforest) and we can devalop  accuracy to 0.831 and F1 sscore = 0.894 with random forest.
+Finally we try to improve the final results by combining the results of different methods and get accuracy for ensemble prediction = 0.8309
+that a bit lower than random forest. 
+
+##Github Reference
+https://github.com/kanntinan/DS/blob/master/Census%20income%20capstone.Rmd
+
