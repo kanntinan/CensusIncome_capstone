@@ -93,8 +93,12 @@ for(i in names(data[, sapply(data, class) %in% c("character","factor")])) {
 }
 ggarrange(fctplots[[1]],fctplots[[2]],fctplots[[3]],fctplots[[4]],fctplots[[5]],fctplots[[6]],
           fctplots[[7]],fctplots[[8]],fctplots[[9]],ncol = 3, nrow = 3)
-
 ```
+
+```{r}
+![Alt Text](http://127.0.0.1:46779/chunk_output/s/E1A070EA/c4of6tujjan5a/00000d.png)
+```
+
 
 ```{r}
 propplots <- list()
